@@ -33,7 +33,7 @@ func initTracer() (*sdktrace.TracerProvider, error) {
 		)),
 	)
 	otel.SetTracerProvider(tp)
-	
+
 	// Register the W3C Trace Context propagator globally.
 	// This is critical for trace context propagation across queue boundaries.
 	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
@@ -64,7 +64,6 @@ func main() {
 
 	// Initialize pluggable storage engine
 	var store queue.Store
-	var err error
 	dsn := os.Getenv("DATABASE_URL")
 	if dsn != "" {
 		log.Println("[App] Connecting to pluggable PostgreSQL backend store...")
@@ -96,6 +95,10 @@ func main() {
 		Jitter:     true,
 	}
 
+	// Setup Server-Sent Events HTTP dashboard server
+	dashboardAddr := ":8080"
+	server := dashboard.NewServer(store, dashboardAddr)
+
 	// Create Worker Pool with concurrency of 3
 	pool := queue.NewWorkerPool(
 		store,
@@ -105,11 +108,10 @@ func main() {
 		queue.WithSweeperInterval(3*time.Second),
 		queue.WithQueues("critical", "high", "default", "low"),
 		queue.WithRetryPolicy(retryPolicy),
+		queue.WithStateChangeCallback(func() {
+			server.NotifyChange()
+		}),
 	)
-
-	// Setup Server-Sent Events HTTP dashboard server
-	dashboardAddr := ":8080"
-	server := dashboard.NewServer(store, dashboardAddr)
 
 	// Handler wrappers that parse payload and print nice console outputs
 	wrapHandler := func(handlerName string, simulateWork func(ctx context.Context, data string) error) queue.Handler {
@@ -120,9 +122,6 @@ func main() {
 
 			log.Printf("[Worker] ==> Processing Job %s [Queue: %s, Type: %s, Retry: %d/%d, TraceID: %s]",
 				j.ID, j.Queue, j.Type, j.Retries, j.MaxRetries, traceID)
-
-			// Notify UI that a job is processing
-			server.NotifyChange()
 
 			var payload jobPayload
 			if err := json.Unmarshal(j.Payload, &payload); err != nil {
@@ -137,9 +136,6 @@ func main() {
 
 			// Execute actual worker logic
 			err := simulateWork(ctx, payload.Data)
-			
-			// Notify UI about state change
-			server.NotifyChange()
 			return err
 		}
 	}
@@ -182,7 +178,7 @@ func main() {
 	// Wait for OS interrupt signal for graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
-	
+
 	// Print interactive logs
 	fmt.Printf("\n=======================================================\n")
 	fmt.Printf("🚀 Reliable Job Queue engine is running!\n")
@@ -194,10 +190,10 @@ func main() {
 	<-sigChan
 
 	fmt.Println("\n[App] Shutdown signal received. Cleaning up...")
-	
+
 	// 1. Stop processing new jobs and wait for active workers to drain
 	pool.Stop()
-	
+
 	// 2. Close db
 	log.Println("[App] Closing database and exiting.")
 }

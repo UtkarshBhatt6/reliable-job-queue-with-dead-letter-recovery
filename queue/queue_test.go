@@ -81,7 +81,7 @@ func TestQueueStores(t *testing.T) {
 				ID:         "job-2",
 				Type:       "sms",
 				Payload:    []byte("world"),
-				MaxRetries: 2,
+				MaxRetries: 1,
 			}
 			if err := store.Enqueue(ctx, job2); err != nil {
 				t.Fatalf("Enqueue failed: %v", err)

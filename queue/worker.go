@@ -42,6 +42,7 @@ type WorkerPool struct {
 	leaseDuration   time.Duration
 	sweeperInterval time.Duration
 	retryPolicy     RetryPolicy
+	onStateChange   func()
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -76,6 +77,11 @@ func WithQueues(queues ...string) WorkerOption {
 // WithRetryPolicy configures a custom retry policy for backoffs.
 func WithRetryPolicy(p RetryPolicy) WorkerOption {
 	return func(w *WorkerPool) { w.retryPolicy = p }
+}
+
+// WithStateChangeCallback sets a callback to be executed when a job's state changes in the store.
+func WithStateChangeCallback(callback func()) WorkerOption {
+	return func(w *WorkerPool) { w.onStateChange = callback }
 }
 
 // NewWorkerPool creates a new WorkerPool.
@@ -164,6 +170,10 @@ func (w *WorkerPool) workerLoop(workerID int) {
 				continue
 			}
 
+			if w.onStateChange != nil {
+				w.onStateChange()
+			}
+
 			w.processJob(job)
 		}
 	}
@@ -228,6 +238,10 @@ func (w *WorkerPool) processJob(job *Job) {
 			log.Printf("[Worker] Error calling Ack for job %s: %v", job.ID, ackErr)
 		}
 	}
+
+	if w.onStateChange != nil {
+		w.onStateChange()
+	}
 }
 
 func (w *WorkerPool) sweeperLoop() {
@@ -248,6 +262,9 @@ func (w *WorkerPool) sweeperLoop() {
 			}
 			if count > 0 {
 				log.Printf("[Sweeper] Released %d expired job leases", count)
+				if w.onStateChange != nil {
+					w.onStateChange()
+				}
 			}
 		}
 	}

@@ -452,7 +452,7 @@ func (s *SQLiteStore) Nack(ctx context.Context, jobID string, nextRunIn time.Dur
 	var newState string
 	var nextRunAt interface{}
 
-	if newRetries >= maxRetries {
+	if newRetries > maxRetries {
 		newState = string(StateDeadLetter)
 		nextRunAt = time.Time{}
 	} else {
@@ -471,7 +471,7 @@ func (s *SQLiteStore) Nack(ctx context.Context, jobID string, nextRunIn time.Dur
 		return fmt.Errorf("failed to nack job: %w", err)
 	}
 
-	if newRetries >= maxRetries {
+	if newRetries > maxRetries {
 		JobsProcessed.WithLabelValues(jobType, string(StateDeadLetter)).Inc()
 	} else {
 		JobsRetried.WithLabelValues(jobType).Inc()
@@ -707,7 +707,7 @@ func (s *SQLiteStore) SweeperReleaseExpired(ctx context.Context) (int, error) {
 		var newState string
 		var nextRunAt interface{}
 
-		if newRetries >= ej.maxRetries {
+		if newRetries > ej.maxRetries {
 			newState = string(StateDeadLetter)
 			nextRunAt = time.Time{}
 		} else {
@@ -728,7 +728,7 @@ func (s *SQLiteStore) SweeperReleaseExpired(ctx context.Context) (int, error) {
 		affected, err := result.RowsAffected()
 		if err == nil && affected > 0 {
 			count++
-			if newRetries >= ej.maxRetries {
+			if newRetries > ej.maxRetries {
 				JobsProcessed.WithLabelValues(ej.jobType, string(StateDeadLetter)).Inc()
 			} else {
 				JobsRetried.WithLabelValues(ej.jobType).Inc()

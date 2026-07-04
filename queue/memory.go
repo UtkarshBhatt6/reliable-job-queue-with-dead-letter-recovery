@@ -270,7 +270,7 @@ func (s *MemoryStore) Nack(ctx context.Context, jobID string, nextRunIn time.Dur
 	j.ReservedUntil = time.Time{}
 	j.UpdatedAt = time.Now()
 
-	if j.Retries >= j.MaxRetries {
+	if j.Retries > j.MaxRetries {
 		j.State = StateDeadLetter
 		j.RunAt = time.Time{}
 		JobsProcessed.WithLabelValues(j.Type, string(StateDeadLetter)).Inc()
@@ -420,7 +420,7 @@ func (s *MemoryStore) SweeperReleaseExpired(ctx context.Context) (int, error) {
 			j.UpdatedAt = now
 			j.LastError = "lease expired: worker heartbeat timeout"
 
-			if j.Retries >= j.MaxRetries {
+			if j.Retries > j.MaxRetries {
 				j.State = StateDeadLetter
 				j.RunAt = time.Time{}
 				JobsProcessed.WithLabelValues(j.Type, string(StateDeadLetter)).Inc()
