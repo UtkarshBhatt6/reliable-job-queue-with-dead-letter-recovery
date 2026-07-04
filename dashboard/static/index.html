@@ -1,0 +1,169 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Reliable Job Queue Dashboard</title>
+    <!-- Modern Premium Font -->
+    <link href="https://fonts.googleapis.com/css2?family=Outfit:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <!-- FontAwesome Icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <link rel="stylesheet" href="app.css">
+</head>
+<body>
+    <div class="glass-bg"></div>
+    <div class="app-container">
+        <!-- Header -->
+        <header class="app-header">
+            <div class="logo">
+                <i class="fa-solid fa-server-dns pulse-icon"></i>
+                <h1>Reliable Job Queue <span>Engine</span></h1>
+            </div>
+            <div class="header-actions">
+                <div class="badge-status">
+                    <span class="status-indicator online"></span>
+                    <span id="backend-type">SQLite Engine</span>
+                </div>
+                <div class="badge-status metrics-badge">
+                    <a href="/metrics" target="_blank" title="Prometheus Metrics Endpoint">
+                        <i class="fa-solid fa-chart-line"></i> Prometheus /metrics
+                    </a>
+                </div>
+            </div>
+        </header>
+
+        <!-- Stats Counter Row -->
+        <section class="stats-grid">
+            <div class="stat-card pending" onclick="filterJobs('pending')">
+                <div class="stat-icon"><i class="fa-solid fa-hourglass-start"></i></div>
+                <div class="stat-content">
+                    <h3>Pending</h3>
+                    <p class="stat-number" id="stat-pending">0</p>
+                </div>
+                <div class="card-glow"></div>
+            </div>
+            <div class="stat-card processing" onclick="filterJobs('processing')">
+                <div class="stat-icon"><i class="fa-solid fa-arrows-spin spin-icon"></i></div>
+                <div class="stat-content">
+                    <h3>Processing</h3>
+                    <p class="stat-number" id="stat-processing">0</p>
+                </div>
+                <div class="card-glow"></div>
+            </div>
+            <div class="stat-card completed" onclick="filterJobs('completed')">
+                <div class="stat-icon"><i class="fa-solid fa-circle-check"></i></div>
+                <div class="stat-content">
+                    <h3>Completed</h3>
+                    <p class="stat-number" id="stat-completed">0</p>
+                </div>
+                <div class="card-glow"></div>
+            </div>
+            <div class="stat-card failed" onclick="filterJobs('failed')">
+                <div class="stat-icon"><i class="fa-solid fa-circle-exclamation"></i></div>
+                <div class="stat-content">
+                    <h3>Failed (Retrying)</h3>
+                    <p class="stat-number" id="stat-failed">0</p>
+                </div>
+                <div class="card-glow"></div>
+            </div>
+            <div class="stat-card dead-letter" onclick="filterJobs('dead_letter')">
+                <div class="stat-icon"><i class="fa-solid fa-skull-crossbones"></i></div>
+                <div class="stat-content">
+                    <h3>Dead Letter (DLQ)</h3>
+                    <p class="stat-number" id="stat-dead-letter">0</p>
+                </div>
+                <div class="card-glow"></div>
+            </div>
+        </section>
+
+        <!-- Main Content Area -->
+        <main class="main-grid">
+            <!-- Left Panel: Actions & Submit -->
+            <section class="control-panel">
+                <div class="panel-card glass-panel">
+                    <h2><i class="fa-solid fa-plus-circle"></i> Enqueue Job</h2>
+                    <form id="enqueue-form">
+                        <div class="form-group">
+                            <label for="job-type">Job Type</label>
+                            <select id="job-type" required>
+                                <option value="send_email">📧 send_email</option>
+                                <option value="process_payment">💳 process_payment</option>
+                                <option value="generate_report">📊 generate_report</option>
+                                <option value="sync_crm">🔄 sync_crm</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
+                            <label for="job-payload">Payload (Text data)</label>
+                            <textarea id="job-payload" placeholder="e.g. user_id: 1045, amount: 250.00" rows="3" required></textarea>
+                        </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="job-delay">Delay (seconds)</label>
+                                <input type="number" id="job-delay" min="0" value="0">
+                            </div>
+                            <div class="form-group">
+                                <label for="job-max-retries">Max Retries</label>
+                                <input type="number" id="job-max-retries" min="1" max="10" value="3">
+                            </div>
+                        </div>
+                        <div class="form-group checkbox-group">
+                            <input type="checkbox" id="job-force-fail">
+                            <label for="job-force-fail">👿 Force failure (causes retry -> DLQ)</label>
+                        </div>
+                        <button type="submit" class="btn-primary">
+                            <span>Enqueue Job</span> <i class="fa-solid fa-paper-plane"></i>
+                        </button>
+                    </form>
+                </div>
+
+                <div class="panel-card glass-panel dlq-actions-card">
+                    <h2><i class="fa-solid fa-toolbox"></i> DLQ Recoveries</h2>
+                    <p class="section-desc">Manage failed jobs that reached maximum retries.</p>
+                    <div class="action-buttons">
+                        <button class="btn-warning" onclick="redriveDLQ()" id="btn-redrive-all">
+                            <i class="fa-solid fa-reply-all"></i> Redrive All DLQ
+                        </button>
+                        <button class="btn-danger-outline" onclick="deleteDLQ()" id="btn-delete-all">
+                            <i class="fa-solid fa-trash-can"></i> Purge All DLQ
+                        </button>
+                    </div>
+                </div>
+            </section>
+
+            <!-- Right Panel: Jobs Viewer -->
+            <section class="viewer-panel glass-panel">
+                <div class="viewer-header">
+                    <h2><i class="fa-solid fa-list-check"></i> <span id="current-filter-title">Pending</span> Jobs</h2>
+                    <div class="refresh-indicator" id="refresh-indicator">
+                        <i class="fa-solid fa-arrows-rotate"></i> Synced live
+                    </div>
+                </div>
+                <div class="table-container">
+                    <table class="jobs-table">
+                        <thead>
+                            <tr>
+                                <th>Job ID</th>
+                                <th>Type</th>
+                                <th>Retries</th>
+                                <th>Schedule / Lease</th>
+                                <th>Last Error</th>
+                                <th>Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="jobs-list">
+                            <tr>
+                                <td colspan="6" class="empty-state">No jobs found in this state.</td>
+                            </tr>
+                        </tbody>
+                    </table>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <!-- Notification Toast -->
+    <div id="toast" class="toast"></div>
+
+    <script src="app.js"></script>
+</body>
+</html>
