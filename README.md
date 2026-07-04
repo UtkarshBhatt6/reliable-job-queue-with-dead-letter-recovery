@@ -94,6 +94,20 @@ Once running:
 - **Web Dashboard**: Access the UI at [http://localhost:8080](http://localhost:8080).
 - **Prometheus Metrics**: Scrape metrics at [http://localhost:8080/metrics](http://localhost:8080/metrics).
 
+### 5. Launch Grafana & Prometheus Dashboards
+We provide a pre-configured Docker Compose stack to automatically collect Prometheus metrics and visualize them in a Grafana dashboard.
+
+To start the monitoring stack:
+```bash
+docker compose up -d
+```
+
+This will spin up:
+- **Prometheus**: Accessible at [http://localhost:9090](http://localhost:9090) (auto-configured to scrape the Go application metrics).
+- **Grafana**: Accessible at [http://localhost:3000](http://localhost:3000) (pre-loaded with the Prometheus datasource and the **Reliable Job Queue Performance Dashboard**).
+  - *Username*: `admin`
+  - *Password*: `admin`
+
 ---
 
 ## UI Guide
