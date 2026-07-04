@@ -84,6 +84,15 @@
                     <h2><i class="fa-solid fa-plus-circle"></i> Enqueue Job</h2>
                     <form id="enqueue-form">
                         <div class="form-group">
+                            <label for="job-queue">Queue Name</label>
+                            <select id="job-queue" required>
+                                <option value="default">default</option>
+                                <option value="critical">critical</option>
+                                <option value="high">high</option>
+                                <option value="low">low</option>
+                            </select>
+                        </div>
+                        <div class="form-group">
                             <label for="job-type">Job Type</label>
                             <select id="job-type" required>
                                 <option value="send_email">📧 send_email</option>
@@ -143,6 +152,7 @@
                         <thead>
                             <tr>
                                 <th>Job ID</th>
+                                <th>Queue</th>
                                 <th>Type</th>
                                 <th>Retries</th>
                                 <th>Schedule / Lease</th>
@@ -152,7 +162,7 @@
                         </thead>
                         <tbody id="jobs-list">
                             <tr>
-                                <td colspan="6" class="empty-state">No jobs found in this state.</td>
+                                <td colspan="7" class="empty-state">No jobs found in this state.</td>
                             </tr>
                         </tbody>
                     </table>

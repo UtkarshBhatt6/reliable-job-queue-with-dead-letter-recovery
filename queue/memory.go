@@ -67,6 +67,10 @@ func (s *MemoryStore) Enqueue(ctx context.Context, job *Job) error {
 		return fmt.Errorf("job %s already exists", job.ID)
 	}
 
+	if job.Queue == "" {
+		job.Queue = "default"
+	}
+
 	now := time.Now()
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
@@ -86,7 +90,7 @@ func (s *MemoryStore) Enqueue(ctx context.Context, job *Job) error {
 }
 
 // Dequeue selects and reserves the next available job.
-func (s *MemoryStore) Dequeue(ctx context.Context, types []string, leaseDuration time.Duration) (*Job, error) {
+func (s *MemoryStore) Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
@@ -99,6 +103,19 @@ func (s *MemoryStore) Dequeue(ctx context.Context, types []string, leaseDuration
 		}
 		if j.RunAt.After(now) {
 			continue
+		}
+
+		if len(queues) > 0 {
+			matched := false
+			for _, q := range queues {
+				if j.Queue == q {
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				continue
+			}
 		}
 
 		if len(types) > 0 {

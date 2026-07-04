@@ -26,6 +26,7 @@ const (
 // Job represents a single unit of work.
 type Job struct {
 	ID            string            `json:"id"`
+	Queue         string            `json:"queue"`
 	Type          string            `json:"type"`
 	Payload       []byte            `json:"payload"`
 	State         JobState          `json:"state"`
@@ -53,9 +54,9 @@ type Store interface {
 	// Enqueue adds a new job to the store.
 	Enqueue(ctx context.Context, job *Job) error
 
-	// Dequeue selects and reserves the next available job of the specified types.
+	// Dequeue selects and reserves the next available job of the specified queues and types.
 	// It returns nil, nil if no jobs are available.
-	Dequeue(ctx context.Context, types []string, leaseDuration time.Duration) (*Job, error)
+	Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error)
 
 	// Ack marks the job as completed.
 	Ack(ctx context.Context, jobID string) error

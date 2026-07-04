@@ -124,6 +124,7 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 type enqueueRequest struct {
+	Queue      string `json:"queue"`
 	Type       string `json:"type"`
 	Payload    string `json:"payload"`
 	DelaySec   int    `json:"delay_sec"`
@@ -184,8 +185,13 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			runAt = runAt.Add(time.Duration(req.DelaySec) * time.Second)
 		}
 
+		if req.Queue == "" {
+			req.Queue = "default"
+		}
+
 		job := &queue.Job{
 			ID:         uuid.New().String(),
+			Queue:      req.Queue,
 			Type:       req.Type,
 			Payload:    payloadBytes,
 			MaxRetries: req.MaxRetries,

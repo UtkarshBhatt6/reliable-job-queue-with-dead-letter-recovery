@@ -78,6 +78,7 @@ func main() {
 		queue.WithPollInterval(200*time.Millisecond),
 		queue.WithLeaseDuration(15*time.Second),
 		queue.WithSweeperInterval(3*time.Second),
+		queue.WithQueues("critical", "high", "default", "low"),
 	)
 
 	// Setup Server-Sent Events HTTP dashboard server
@@ -91,8 +92,8 @@ func main() {
 			span := trace.SpanFromContext(ctx)
 			traceID := span.SpanContext().TraceID().String()
 
-			log.Printf("[Worker] ==> Processing Job %s [Type: %s, Retry: %d/%d, TraceID: %s]",
-				j.ID, j.Type, j.Retries, j.MaxRetries, traceID)
+			log.Printf("[Worker] ==> Processing Job %s [Queue: %s, Type: %s, Retry: %d/%d, TraceID: %s]",
+				j.ID, j.Queue, j.Type, j.Retries, j.MaxRetries, traceID)
 
 			// Notify UI that a job is processing
 			server.NotifyChange()

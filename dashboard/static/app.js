@@ -183,6 +183,7 @@ function renderJobs(jobs) {
 
         tr.innerHTML = `
             <td class="job-id-cell" title="${job.id}">${job.id.substring(0, 8)}...</td>
+            <td><span class="job-type-badge" style="background: rgba(143, 117, 255, 0.1); color: var(--color-pending);">${job.queue}</span></td>
             <td>
                 <span class="job-type-badge">${job.type}</span>
                 <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
@@ -208,6 +209,7 @@ function setupForms() {
     form.addEventListener('submit', async (e) => {
         e.preventDefault();
 
+        const queue = document.getElementById('job-queue').value;
         const type = document.getElementById('job-type').value;
         const payload = document.getElementById('job-payload').value;
         const delaySec = parseInt(document.getElementById('job-delay').value) || 0;
@@ -218,7 +220,7 @@ function setupForms() {
             const response = await fetch('/api/jobs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ type, payload, delay_sec: delaySec, max_retries: maxRetries, force_fail: forceFail })
+                body: JSON.stringify({ queue, type, payload, delay_sec: delaySec, max_retries: maxRetries, force_fail: forceFail })
             });
 
             if (response.ok) {

@@ -38,6 +38,7 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	schema := `
 	CREATE TABLE IF NOT EXISTS jobs (
 		id TEXT PRIMARY KEY,
+		queue TEXT NOT NULL DEFAULT 'default',
 		type TEXT NOT NULL,
 		payload BLOB NOT NULL,
 		state TEXT NOT NULL,
@@ -50,7 +51,7 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 		updated_at DATETIME NOT NULL,
 		trace_context TEXT
 	);
-	CREATE INDEX IF NOT EXISTS idx_jobs_state_run_at ON jobs (state, run_at);
+	CREATE INDEX IF NOT EXISTS idx_jobs_queue_state_run_at ON jobs (queue, state, run_at);
 	CREATE INDEX IF NOT EXISTS idx_jobs_type ON jobs (type);
 	`
 	if _, err := db.Exec(schema); err != nil {
@@ -99,6 +100,9 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 		job.RunAt = now
 	}
 	job.State = StatePending
+	if job.Queue == "" {
+		job.Queue = "default"
+	}
 
 	var traceJSON []byte
 	if job.TraceContext != nil {
@@ -110,8 +114,8 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 	}
 
 	query := `
-	INSERT INTO jobs (id, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	INSERT INTO jobs (id, queue, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context)
+	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`
 
 	var reservedUntil interface{}
@@ -121,6 +125,7 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 
 	_, err := s.db.ExecContext(ctx, query,
 		job.ID,
+		job.Queue,
 		job.Type,
 		job.Payload,
 		string(job.State),
@@ -143,13 +148,24 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 }
 
 // Dequeue fetches the next available job, updates its state to 'processing', and locks it.
-func (s *SQLiteStore) Dequeue(ctx context.Context, types []string, leaseDuration time.Duration) (*Job, error) {
+func (s *SQLiteStore) Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error) {
 	now := time.Now()
 
-	// Build query based on whether types filter is provided
-	var selectQuery string
+	var whereParts []string
 	var args []interface{}
 	args = append(args, now)
+
+	whereParts = append(whereParts, "(state = 'pending' OR state = 'failed')")
+	whereParts = append(whereParts, "run_at <= ?")
+
+	if len(queues) > 0 {
+		placeholders := make([]string, len(queues))
+		for i, q := range queues {
+			placeholders[i] = "?"
+			args = append(args, q)
+		}
+		whereParts = append(whereParts, fmt.Sprintf("queue IN (%s)", strings.Join(placeholders, ",")))
+	}
 
 	if len(types) > 0 {
 		placeholders := make([]string, len(types))
@@ -157,25 +173,16 @@ func (s *SQLiteStore) Dequeue(ctx context.Context, types []string, leaseDuration
 			placeholders[i] = "?"
 			args = append(args, t)
 		}
-		selectQuery = fmt.Sprintf(`
-			SELECT id, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
-			FROM jobs
-			WHERE (state = 'pending' OR state = 'failed')
-			  AND run_at <= ?
-			  AND type IN (%s)
-			ORDER BY run_at ASC, created_at ASC
-			LIMIT 1
-		`, strings.Join(placeholders, ","))
-	} else {
-		selectQuery = `
-			SELECT id, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
-			FROM jobs
-			WHERE (state = 'pending' OR state = 'failed')
-			  AND run_at <= ?
-			ORDER BY run_at ASC, created_at ASC
-			LIMIT 1
-		`
+		whereParts = append(whereParts, fmt.Sprintf("type IN (%s)", strings.Join(placeholders, ",")))
 	}
+
+	selectQuery := fmt.Sprintf(`
+		SELECT id, queue, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
+		FROM jobs
+		WHERE %s
+		ORDER BY run_at ASC, created_at ASC
+		LIMIT 1
+	`, strings.Join(whereParts, " AND "))
 
 	// Loop to handle optimistic locking retries if concurrent workers conflict
 	for i := 0; i < 5; i++ {
@@ -192,6 +199,7 @@ func (s *SQLiteStore) Dequeue(ctx context.Context, types []string, leaseDuration
 
 		err = tx.QueryRowContext(ctx, selectQuery, args...).Scan(
 			&j.ID,
+			&j.Queue,
 			&j.Type,
 			&j.Payload,
 			&j.State,
@@ -379,7 +387,7 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (Stats, error) {
 // ListJobs returns jobs filtered by state with pagination.
 func (s *SQLiteStore) ListJobs(ctx context.Context, state JobState, limit, offset int) ([]*Job, error) {
 	query := `
-		SELECT id, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
+		SELECT id, queue, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
 		FROM jobs
 		WHERE state = ?
 		ORDER BY created_at DESC
@@ -400,6 +408,7 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, state JobState, limit, offse
 
 		err := rows.Scan(
 			&j.ID,
+			&j.Queue,
 			&j.Type,
 			&j.Payload,
 			&j.State,

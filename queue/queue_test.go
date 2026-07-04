@@ -47,7 +47,7 @@ func TestQueueStores(t *testing.T) {
 			}
 
 			// Dequeue
-			dqJob, err := store.Dequeue(ctx, []string{"email"}, 10*time.Second)
+			dqJob, err := store.Dequeue(ctx, []string{"default"}, []string{"email"}, 10*time.Second)
 			if err != nil {
 				t.Fatalf("Dequeue failed: %v", err)
 			}
@@ -88,7 +88,7 @@ func TestQueueStores(t *testing.T) {
 			}
 
 			// 1st processing
-			dqJob2, err := store.Dequeue(ctx, []string{"sms"}, 500*time.Millisecond)
+			dqJob2, err := store.Dequeue(ctx, []string{"default"}, []string{"sms"}, 500*time.Millisecond)
 			if err != nil || dqJob2 == nil {
 				t.Fatalf("Dequeue job-2 failed: %v", err)
 			}
@@ -103,7 +103,7 @@ func TestQueueStores(t *testing.T) {
 			time.Sleep(20 * time.Millisecond)
 
 			// 2nd processing
-			dqJob2, err = store.Dequeue(ctx, []string{"sms"}, 500*time.Millisecond)
+			dqJob2, err = store.Dequeue(ctx, []string{"default"}, []string{"sms"}, 500*time.Millisecond)
 			if err != nil || dqJob2 == nil {
 				t.Fatalf("Dequeue job-2 second time failed: %v", err)
 			}
@@ -161,7 +161,7 @@ func TestQueueStores(t *testing.T) {
 				MaxRetries: 3,
 			}
 			_ = store.Enqueue(ctx, job3)
-			dqJob3, _ := store.Dequeue(ctx, []string{"render"}, 10*time.Millisecond) // short lease
+			dqJob3, _ := store.Dequeue(ctx, []string{"default"}, []string{"render"}, 10*time.Millisecond) // short lease
 			if dqJob3 == nil {
 				t.Fatalf("dqJob3 is nil")
 			}
@@ -186,6 +186,37 @@ func TestQueueStores(t *testing.T) {
 			if stats.Failed == 0 && stats.Pending == 0 {
 				t.Errorf("expected job-3 to be failed or pending after sweep, got %+v", stats)
 			}
+
+			// Test Named Queue Isolation
+			job4 := &Job{
+				ID:         "job-4",
+				Queue:      "critical",
+				Type:       "alert",
+				Payload:    []byte("critical-alert"),
+				MaxRetries: 3,
+			}
+			_ = store.Enqueue(ctx, job4)
+
+			// Try dequeuing from 'default' queue - should be nil
+			dqDefault, err := store.Dequeue(ctx, []string{"default"}, []string{"alert"}, 10*time.Second)
+			if err != nil {
+				t.Fatalf("Default dequeue failed: %v", err)
+			}
+			if dqDefault != nil {
+				t.Errorf("expected no job from default queue, got %s", dqDefault.ID)
+			}
+
+			// Try dequeuing from 'critical' queue - should find job-4
+			dqCritical, err := store.Dequeue(ctx, []string{"critical"}, []string{"alert"}, 10*time.Second)
+			if err != nil {
+				t.Fatalf("Critical dequeue failed: %v", err)
+			}
+			if dqCritical == nil || dqCritical.ID != "job-4" {
+				t.Errorf("expected job-4 from critical queue, got %v", dqCritical)
+			}
+
+			// Clean up critical job
+			_ = store.Ack(ctx, "job-4")
 		})
 	}
 }

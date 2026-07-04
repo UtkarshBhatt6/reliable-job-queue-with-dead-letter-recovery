@@ -20,6 +20,7 @@ type Handler func(ctx context.Context, job *Job) error
 type WorkerPool struct {
 	store           Store
 	concurrency     int
+	queues          []string
 	handlers        map[string]Handler
 	pollInterval    time.Duration
 	leaseDuration   time.Duration
@@ -50,12 +51,18 @@ func WithSweeperInterval(d time.Duration) WorkerOption {
 	return func(w *WorkerPool) { w.sweeperInterval = d }
 }
 
+// WithQueues sets which queues this worker pool polls from.
+func WithQueues(queues ...string) WorkerOption {
+	return func(w *WorkerPool) { w.queues = queues }
+}
+
 // NewWorkerPool creates a new WorkerPool.
 func NewWorkerPool(store Store, concurrency int, options ...WorkerOption) *WorkerPool {
 	ctx, cancel := context.WithCancel(context.Background())
 	w := &WorkerPool{
 		store:           store,
 		concurrency:     concurrency,
+		queues:          []string{"default"},
 		handlers:        make(map[string]Handler),
 		pollInterval:    200 * time.Millisecond,
 		leaseDuration:   30 * time.Second,
@@ -125,7 +132,7 @@ func (w *WorkerPool) workerLoop(workerID int) {
 			}
 
 			// Poll a job
-			job, err := w.store.Dequeue(w.ctx, types, w.leaseDuration)
+			job, err := w.store.Dequeue(w.ctx, w.queues, types, w.leaseDuration)
 			if err != nil {
 				log.Printf("[Worker %d] error dequeuing job: %v", workerID, err)
 				continue
