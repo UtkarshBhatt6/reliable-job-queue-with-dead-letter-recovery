@@ -62,14 +62,39 @@ func main() {
 		}
 	}()
 
-	// Initialize SQLite Database Engine
-	dbPath := "./jobs.db"
-	store, err := queue.NewSQLiteStore(dbPath)
-	if err != nil {
-		log.Fatalf("Failed to initialize SQLite store: %v", err)
+	// Initialize pluggable storage engine
+	var store queue.Store
+	var err error
+	dsn := os.Getenv("DATABASE_URL")
+	if dsn != "" {
+		log.Println("[App] Connecting to pluggable PostgreSQL backend store...")
+		store, err = queue.NewPostgresStore(dsn)
+		if err != nil {
+			log.Fatalf("Failed to initialize PostgreSQL store: %v", err)
+		}
+		log.Println("[App] PostgreSQL backend store successfully connected")
+	} else {
+		dbPath := "./jobs.db"
+		log.Printf("[App] Connecting to default SQLite backend store at %s...", dbPath)
+		store, err = queue.NewSQLiteStore(dbPath)
+		if err != nil {
+			log.Fatalf("Failed to initialize SQLite store: %v", err)
+		}
+		log.Printf("[App] SQLite backend store successfully initialized")
 	}
-	defer store.Close()
-	log.Printf("[App] SQLite backend store initialized at %s", dbPath)
+	defer func() {
+		if closer, ok := store.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+	}()
+
+	// Advanced Retry Policy with Jitter
+	retryPolicy := queue.RetryPolicy{
+		BaseDelay:  1 * time.Second,
+		MaxDelay:   30 * time.Second,
+		Multiplier: 2.0,
+		Jitter:     true,
+	}
 
 	// Create Worker Pool with concurrency of 3
 	pool := queue.NewWorkerPool(
@@ -79,6 +104,7 @@ func main() {
 		queue.WithLeaseDuration(15*time.Second),
 		queue.WithSweeperInterval(3*time.Second),
 		queue.WithQueues("critical", "high", "default", "low"),
+		queue.WithRetryPolicy(retryPolicy),
 	)
 
 	// Setup Server-Sent Events HTTP dashboard server

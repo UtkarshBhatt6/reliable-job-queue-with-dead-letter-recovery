@@ -115,6 +115,20 @@
                                 <input type="number" id="job-max-retries" min="1" max="10" value="3">
                             </div>
                         </div>
+                        <div class="form-row">
+                            <div class="form-group">
+                                <label for="job-priority">Priority</label>
+                                <input type="number" id="job-priority" value="0">
+                            </div>
+                            <div class="form-group">
+                                <label for="job-dedup-key">Idempotency Key</label>
+                                <input type="text" id="job-dedup-key" placeholder="Optional">
+                            </div>
+                        </div>
+                        <div class="form-group">
+                            <label for="job-dedup-ttl">Deduplication Key TTL (seconds)</label>
+                            <input type="number" id="job-dedup-ttl" min="0" value="60">
+                        </div>
                         <div class="form-group checkbox-group">
                             <input type="checkbox" id="job-force-fail">
                             <label for="job-force-fail">👿 Force failure (causes retry -> DLQ)</label>
@@ -153,6 +167,7 @@
                             <tr>
                                 <th>Job ID</th>
                                 <th>Queue</th>
+                                <th>Priority</th>
                                 <th>Type</th>
                                 <th>Retries</th>
                                 <th>Schedule / Lease</th>
@@ -162,7 +177,7 @@
                         </thead>
                         <tbody id="jobs-list">
                             <tr>
-                                <td colspan="7" class="empty-state">No jobs found in this state.</td>
+                                <td colspan="8" class="empty-state">No jobs found in this state.</td>
                             </tr>
                         </tbody>
                     </table>

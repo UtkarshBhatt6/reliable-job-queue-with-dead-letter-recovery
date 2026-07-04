@@ -58,19 +58,28 @@ func (s *MemoryStore) updateMetrics() {
 	QueueDepth.WithLabelValues(string(StateDeadLetter)).Set(float64(dlq))
 }
 
-// Enqueue adds a new job to the store.
-func (s *MemoryStore) Enqueue(ctx context.Context, job *Job) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if _, exists := s.jobs[job.ID]; exists {
-		return fmt.Errorf("job %s already exists", job.ID)
+// checkDeduplicationLocked returns true if a duplicate active/valid job exists.
+func (s *MemoryStore) checkDeduplicationLocked(job *Job) bool {
+	if job.DeduplicationKey == "" {
+		return false
 	}
-
-	if job.Queue == "" {
-		job.Queue = "default"
+	now := time.Now()
+	for _, j := range s.jobs {
+		if j.DeduplicationKey == job.DeduplicationKey {
+			// Skip if TTL has expired
+			if !j.DeduplicationExpiresAt.IsZero() && j.DeduplicationExpiresAt.Before(now) {
+				continue
+			}
+			// Active or non-expired completed job qualifies as duplicate
+			if j.State != StateCompleted || (!j.DeduplicationExpiresAt.IsZero() && j.DeduplicationExpiresAt.After(now)) {
+				return true
+			}
+		}
 	}
+	return false
+}
 
+func (s *MemoryStore) enqueueLocked(job *Job) {
 	now := time.Now()
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
@@ -80,19 +89,72 @@ func (s *MemoryStore) Enqueue(ctx context.Context, job *Job) error {
 		job.RunAt = now
 	}
 	job.State = StatePending
+	if job.Queue == "" {
+		job.Queue = "default"
+	}
 
-	// Clone job to avoid mutations sharing references
 	copiedJob := *job
 	s.jobs[job.ID] = &copiedJob
-
 	JobsEnqueued.WithLabelValues(job.Type).Inc()
+}
+
+// Enqueue adds a new job to the store.
+func (s *MemoryStore) Enqueue(ctx context.Context, job *Job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if _, exists := s.jobs[job.ID]; exists {
+		return fmt.Errorf("job %s already exists", job.ID)
+	}
+
+	if s.checkDeduplicationLocked(job) {
+		// Silently ignore duplicates to maintain idempotency
+		return nil
+	}
+
+	s.enqueueLocked(job)
+	return nil
+}
+
+// EnqueueBatch adds multiple new jobs to the store atomically.
+func (s *MemoryStore) EnqueueBatch(ctx context.Context, jobs []*Job) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	// Verify IDs and existence first
+	for _, job := range jobs {
+		if _, exists := s.jobs[job.ID]; exists {
+			return fmt.Errorf("job %s already exists", job.ID)
+		}
+	}
+
+	// Enqueue valid, non-duplicate jobs
+	for _, job := range jobs {
+		if s.checkDeduplicationLocked(job) {
+			continue // Skip duplicates
+		}
+		s.enqueueLocked(job)
+	}
 	return nil
 }
 
 // Dequeue selects and reserves the next available job.
 func (s *MemoryStore) Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error) {
+	jobs, err := s.DequeueBatch(ctx, queues, types, 1, leaseDuration)
+	if err != nil || len(jobs) == 0 {
+		return nil, err
+	}
+	return jobs[0], nil
+}
+
+// DequeueBatch selects and reserves up to batchSize next available jobs.
+func (s *MemoryStore) DequeueBatch(ctx context.Context, queues []string, types []string, batchSize int, leaseDuration time.Duration) ([]*Job, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+
+	if batchSize <= 0 {
+		return []*Job{}, nil
+	}
 
 	now := time.Now()
 	var candidates []*Job
@@ -134,24 +196,37 @@ func (s *MemoryStore) Dequeue(ctx context.Context, queues []string, types []stri
 	}
 
 	if len(candidates) == 0 {
-		return nil, nil
+		return []*Job{}, nil
 	}
 
-	// Sort: Earliest RunAt first (FIFO), then CreatedAt
+	// Sort: 1) Priority (descending) 2) RunAt (ascending) 3) CreatedAt (ascending)
 	sort.Slice(candidates, func(i, j int) bool {
+		if candidates[i].Priority != candidates[j].Priority {
+			return candidates[i].Priority > candidates[j].Priority
+		}
 		if candidates[i].RunAt.Equal(candidates[j].RunAt) {
 			return candidates[i].CreatedAt.Before(candidates[j].CreatedAt)
 		}
 		return candidates[i].RunAt.Before(candidates[j].RunAt)
 	})
 
-	selected := candidates[0]
-	selected.State = StateProcessing
-	selected.ReservedUntil = now.Add(leaseDuration)
-	selected.UpdatedAt = now
+	limit := batchSize
+	if limit > len(candidates) {
+		limit = len(candidates)
+	}
 
-	copiedJob := *selected
-	return &copiedJob, nil
+	results := make([]*Job, 0, limit)
+	for i := 0; i < limit; i++ {
+		selected := candidates[i]
+		selected.State = StateProcessing
+		selected.ReservedUntil = now.Add(leaseDuration)
+		selected.UpdatedAt = now
+
+		copiedJob := *selected
+		results = append(results, &copiedJob)
+	}
+
+	return results, nil
 }
 
 // Ack marks the job as completed.
@@ -205,6 +280,25 @@ func (s *MemoryStore) Nack(ctx context.Context, jobID string, nextRunIn time.Dur
 		JobsRetried.WithLabelValues(j.Type).Inc()
 	}
 
+	return nil
+}
+
+// Heartbeat extends the visibility timeout of a processing job.
+func (s *MemoryStore) Heartbeat(ctx context.Context, jobID string, extendBy time.Duration) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	j, exists := s.jobs[jobID]
+	if !exists {
+		return ErrJobNotFound
+	}
+
+	if j.State != StateProcessing {
+		return fmt.Errorf("%w: job is in %s state, not processing", ErrInvalidState, j.State)
+	}
+
+	j.ReservedUntil = time.Now().Add(extendBy)
+	j.UpdatedAt = time.Now()
 	return nil
 }
 

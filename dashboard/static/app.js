@@ -118,7 +118,7 @@ function renderJobs(jobs) {
     tbody.innerHTML = '';
 
     if (!jobs || jobs.length === 0) {
-        tbody.innerHTML = `<tr><td colspan="6" class="empty-state">No jobs found in this state.</td></tr>`;
+        tbody.innerHTML = `<tr><td colspan="8" class="empty-state">No jobs found in this state.</td></tr>`;
         return;
     }
 
@@ -184,10 +184,12 @@ function renderJobs(jobs) {
         tr.innerHTML = `
             <td class="job-id-cell" title="${job.id}">${job.id.substring(0, 8)}...</td>
             <td><span class="job-type-badge" style="background: rgba(143, 117, 255, 0.1); color: var(--color-pending);">${job.queue}</span></td>
+            <td><span class="job-type-badge" style="background: rgba(30, 215, 96, 0.1); color: #1ed760;">${job.priority}</span></td>
             <td>
                 <span class="job-type-badge">${job.type}</span>
                 <div style="font-size: 0.75rem; color: var(--text-secondary); margin-top: 0.25rem;">
                     Payload: <code>${payloadStr}</code>
+                    ${job.deduplication_key ? `<br/>Idempotency Key: <code>${job.deduplication_key}</code>` : ''}
                 </div>
             </td>
             <td>${job.retries} / ${job.max_retries}</td>
@@ -210,6 +212,9 @@ function setupForms() {
         e.preventDefault();
 
         const queue = document.getElementById('job-queue').value;
+        const priority = parseInt(document.getElementById('job-priority').value) || 0;
+        const deduplication_key = document.getElementById('job-dedup-key').value || "";
+        const deduplication_ttl = parseInt(document.getElementById('job-dedup-ttl').value) || 0;
         const type = document.getElementById('job-type').value;
         const payload = document.getElementById('job-payload').value;
         const delaySec = parseInt(document.getElementById('job-delay').value) || 0;
@@ -220,7 +225,17 @@ function setupForms() {
             const response = await fetch('/api/jobs', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ queue, type, payload, delay_sec: delaySec, max_retries: maxRetries, force_fail: forceFail })
+                body: JSON.stringify({
+                    queue,
+                    priority,
+                    deduplication_key,
+                    deduplication_ttl,
+                    type,
+                    payload,
+                    delay_sec: delaySec,
+                    max_retries: maxRetries,
+                    force_fail: forceFail
+                })
             });
 
             if (response.ok) {
@@ -229,6 +244,9 @@ function setupForms() {
                 // Set default values back
                 document.getElementById('job-delay').value = 0;
                 document.getElementById('job-max-retries').value = 3;
+                document.getElementById('job-priority').value = 0;
+                document.getElementById('job-dedup-key').value = '';
+                document.getElementById('job-dedup-ttl').value = 60;
                 fetchStats();
                 fetchJobs();
             } else {

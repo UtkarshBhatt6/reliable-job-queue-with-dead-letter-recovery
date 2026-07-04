@@ -9,48 +9,38 @@ import (
 	"strings"
 	"time"
 
-	_ "modernc.org/sqlite"
+	_ "github.com/lib/pq"
 )
 
-type SQLiteStore struct {
+type PostgresStore struct {
 	db *sql.DB
 }
 
-// NewSQLiteStore creates and initializes a new SQLite-backed job store.
-func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
-	db, err := sql.Open("sqlite", dbPath)
+// NewPostgresStore creates and initializes a new Postgres-backed job store.
+func NewPostgresStore(dsn string) (*PostgresStore, error) {
+	db, err := sql.Open("postgres", dsn)
 	if err != nil {
-		return nil, fmt.Errorf("failed to open sqlite database: %w", err)
+		return nil, fmt.Errorf("failed to open postgres database: %w", err)
 	}
 
-	// Configure database WAL mode for high concurrency
-	if _, err := db.Exec("PRAGMA journal_mode=WAL;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to enable WAL mode: %w", err)
-	}
-	if _, err := db.Exec("PRAGMA busy_timeout=5000;"); err != nil {
-		db.Close()
-		return nil, fmt.Errorf("failed to set busy timeout: %w", err)
-	}
-
-	// Create tables with priority and deduplication fields
+	// Schema setup
 	schema := `
 	CREATE TABLE IF NOT EXISTS jobs (
-		id TEXT PRIMARY KEY,
-		queue TEXT NOT NULL DEFAULT 'default',
+		id VARCHAR(255) PRIMARY KEY,
+		queue VARCHAR(255) NOT NULL DEFAULT 'default',
 		priority INTEGER NOT NULL DEFAULT 0,
-		deduplication_key TEXT,
-		deduplication_expires_at DATETIME,
-		type TEXT NOT NULL,
-		payload BLOB NOT NULL,
-		state TEXT NOT NULL,
+		deduplication_key VARCHAR(255),
+		deduplication_expires_at TIMESTAMP WITH TIME ZONE,
+		type VARCHAR(255) NOT NULL,
+		payload BYTEA NOT NULL,
+		state VARCHAR(50) NOT NULL,
 		retries INTEGER NOT NULL DEFAULT 0,
 		max_retries INTEGER NOT NULL DEFAULT 3,
-		run_at DATETIME NOT NULL,
-		reserved_until DATETIME,
+		run_at TIMESTAMP WITH TIME ZONE NOT NULL,
+		reserved_until TIMESTAMP WITH TIME ZONE,
 		last_error TEXT,
-		created_at DATETIME NOT NULL,
-		updated_at DATETIME NOT NULL,
+		created_at TIMESTAMP WITH TIME ZONE NOT NULL,
+		updated_at TIMESTAMP WITH TIME ZONE NOT NULL,
 		trace_context TEXT
 	);
 	CREATE INDEX IF NOT EXISTS idx_jobs_queue_state_priority_run_at ON jobs (queue, state, priority DESC, run_at);
@@ -59,10 +49,10 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	`
 	if _, err := db.Exec(schema); err != nil {
 		db.Close()
-		return nil, fmt.Errorf("failed to initialize schema: %w", err)
+		return nil, fmt.Errorf("failed to initialize postgres schema: %w", err)
 	}
 
-	store := &SQLiteStore{db: db}
+	store := &PostgresStore{db: db}
 
 	// Update queue depth metrics in the background
 	go func() {
@@ -75,7 +65,7 @@ func NewSQLiteStore(dbPath string) (*SQLiteStore, error) {
 	return store, nil
 }
 
-func (s *SQLiteStore) updateMetrics() {
+func (s *PostgresStore) updateMetrics() {
 	stats, err := s.GetStats(context.Background())
 	if err != nil {
 		return
@@ -88,20 +78,20 @@ func (s *SQLiteStore) updateMetrics() {
 }
 
 // Close closes the database connection.
-func (s *SQLiteStore) Close() error {
+func (s *PostgresStore) Close() error {
 	return s.db.Close()
 }
 
-// checkDeduplicationLocked checks if an active duplicate job exists.
-func (s *SQLiteStore) checkDeduplication(ctx context.Context, tx *sql.Tx, job *Job, now time.Time) (bool, error) {
+// checkDeduplication checks if an active duplicate job exists.
+func (s *PostgresStore) checkDeduplication(ctx context.Context, tx *sql.Tx, job *Job, now time.Time) (bool, error) {
 	if job.DeduplicationKey == "" {
 		return false, nil
 	}
 
 	query := `
 		SELECT COUNT(*) FROM jobs
-		WHERE deduplication_key = ?
-		  AND (state != 'completed' OR deduplication_expires_at > ?)
+		WHERE deduplication_key = $1
+		  AND (state != 'completed' OR deduplication_expires_at > $2)
 	`
 	var count int
 	var err error
@@ -117,8 +107,8 @@ func (s *SQLiteStore) checkDeduplication(ctx context.Context, tx *sql.Tx, job *J
 	return count > 0, nil
 }
 
-// Enqueue adds a job to the SQLite store.
-func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
+// Enqueue adds a job to the Postgres store.
+func (s *PostgresStore) Enqueue(ctx context.Context, job *Job) error {
 	tx, err := s.db.BeginTx(ctx, nil)
 	if err != nil {
 		return fmt.Errorf("failed to begin enqueue transaction: %w", err)
@@ -145,8 +135,8 @@ func (s *SQLiteStore) Enqueue(ctx context.Context, job *Job) error {
 	return nil
 }
 
-// EnqueueBatch adds multiple jobs to the store atomically.
-func (s *SQLiteStore) EnqueueBatch(ctx context.Context, jobs []*Job) error {
+// EnqueueBatch adds multiple new jobs to the store atomically.
+func (s *PostgresStore) EnqueueBatch(ctx context.Context, jobs []*Job) error {
 	if len(jobs) == 0 {
 		return nil
 	}
@@ -179,7 +169,7 @@ func (s *SQLiteStore) EnqueueBatch(ctx context.Context, jobs []*Job) error {
 	return nil
 }
 
-func (s *SQLiteStore) enqueueTx(ctx context.Context, tx *sql.Tx, job *Job, now time.Time) error {
+func (s *PostgresStore) enqueueTx(ctx context.Context, tx *sql.Tx, job *Job, now time.Time) error {
 	if job.CreatedAt.IsZero() {
 		job.CreatedAt = now
 	}
@@ -203,7 +193,7 @@ func (s *SQLiteStore) enqueueTx(ctx context.Context, tx *sql.Tx, job *Job, now t
 
 	query := `
 	INSERT INTO jobs (id, queue, priority, deduplication_key, deduplication_expires_at, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context)
-	VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+	VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16)
 	`
 
 	var reservedUntil interface{}
@@ -236,15 +226,15 @@ func (s *SQLiteStore) enqueueTx(ctx context.Context, tx *sql.Tx, job *Job, now t
 	)
 
 	if err != nil {
-		return fmt.Errorf("failed to insert job inside tx: %w", err)
+		return fmt.Errorf("failed to insert job: %w", err)
 	}
 
 	JobsEnqueued.WithLabelValues(job.Type).Inc()
 	return nil
 }
 
-// Dequeue fetches the next available job.
-func (s *SQLiteStore) Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error) {
+// Dequeue selects and reserves the next available job using FOR UPDATE SKIP LOCKED.
+func (s *PostgresStore) Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error) {
 	jobs, err := s.DequeueBatch(ctx, queues, types, 1, leaseDuration)
 	if err != nil || len(jobs) == 0 {
 		return nil, err
@@ -252,164 +242,133 @@ func (s *SQLiteStore) Dequeue(ctx context.Context, queues []string, types []stri
 	return jobs[0], nil
 }
 
-// DequeueBatch fetches up to batchSize next available jobs.
-func (s *SQLiteStore) DequeueBatch(ctx context.Context, queues []string, types []string, batchSize int, leaseDuration time.Duration) ([]*Job, error) {
+// DequeueBatch selects and reserves up to batchSize next available jobs.
+func (s *PostgresStore) DequeueBatch(ctx context.Context, queues []string, types []string, batchSize int, leaseDuration time.Duration) ([]*Job, error) {
 	if batchSize <= 0 {
 		return []*Job{}, nil
 	}
 
 	now := time.Now()
-	var whereParts []string
+	newReservedUntil := now.Add(leaseDuration)
+
+	// Build sub-select query filters
+	var subFilters []string
 	var args []interface{}
-	args = append(args, now)
+	args = append(args, now) // $1
 
-	whereParts = append(whereParts, "(state = 'pending' OR state = 'failed')")
-	whereParts = append(whereParts, "run_at <= ?")
+	subFilters = append(subFilters, "(state = 'pending' OR state = 'failed')")
+	subFilters = append(subFilters, "run_at <= $1")
 
+	argIdx := 2
 	if len(queues) > 0 {
 		placeholders := make([]string, len(queues))
 		for i, q := range queues {
-			placeholders[i] = "?"
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
 			args = append(args, q)
+			argIdx++
 		}
-		whereParts = append(whereParts, fmt.Sprintf("queue IN (%s)", strings.Join(placeholders, ",")))
+		subFilters = append(subFilters, fmt.Sprintf("queue IN (%s)", strings.Join(placeholders, ",")))
 	}
 
 	if len(types) > 0 {
 		placeholders := make([]string, len(types))
 		for i, t := range types {
-			placeholders[i] = "?"
+			placeholders[i] = fmt.Sprintf("$%d", argIdx)
 			args = append(args, t)
+			argIdx++
 		}
-		whereParts = append(whereParts, fmt.Sprintf("type IN (%s)", strings.Join(placeholders, ",")))
+		subFilters = append(subFilters, fmt.Sprintf("type IN (%s)", strings.Join(placeholders, ",")))
 	}
 
-	selectQuery := fmt.Sprintf(`
-		SELECT id, queue, priority, deduplication_key, deduplication_expires_at, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
-		FROM jobs
+	subSelect := fmt.Sprintf(`
+		SELECT id FROM jobs
 		WHERE %s
 		ORDER BY priority DESC, run_at ASC, created_at ASC
-		LIMIT ?
-	`, strings.Join(whereParts, " AND "))
+		FOR UPDATE SKIP LOCKED
+		LIMIT $%d
+	`, strings.Join(subFilters, " AND "), argIdx)
 	
+	// Add batchSize argument ($argIdx)
 	args = append(args, batchSize)
+	argIdx++
 
-	// Optimistic locking claim loop
-	for attempt := 0; attempt < 5; attempt++ {
-		tx, err := s.db.BeginTx(ctx, nil)
+	// Final update query using $argIdx and $(argIdx+1) for reserved_until and updated_at
+	updateQuery := fmt.Sprintf(`
+		UPDATE jobs
+		SET state = 'processing', reserved_until = $%d, updated_at = $%d
+		WHERE id IN (%s)
+		RETURNING id, queue, priority, deduplication_key, deduplication_expires_at, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
+	`, argIdx, argIdx+1, subSelect)
+
+	// Append lease durations and now timestamp to arguments
+	args = append(args, newReservedUntil, now)
+
+	rows, err := s.db.QueryContext(ctx, updateQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed dequeuing postgres batch: %w", err)
+	}
+	defer rows.Close()
+
+	var claimed []*Job
+	for rows.Next() {
+		var j Job
+		var reservedUntilStr sql.NullTime
+		var dedupExpiresAt sql.NullTime
+		var dedupKeyStr sql.NullString
+		var lastErrStr sql.NullString
+		var traceContextStr sql.NullString
+
+		err := rows.Scan(
+			&j.ID,
+			&j.Queue,
+			&j.Priority,
+			&dedupKeyStr,
+			&dedupExpiresAt,
+			&j.Type,
+			&j.Payload,
+			&j.State,
+			&j.Retries,
+			&j.MaxRetries,
+			&j.RunAt,
+			&reservedUntilStr,
+			&lastErrStr,
+			&j.CreatedAt,
+			&j.UpdatedAt,
+			&traceContextStr,
+		)
 		if err != nil {
-			return nil, fmt.Errorf("failed to start dequeue batch transaction: %w", err)
+			return nil, err
 		}
 
-		rows, err := tx.QueryContext(ctx, selectQuery, args...)
-		if err != nil {
-			tx.Rollback()
-			return nil, fmt.Errorf("failed to query jobs in batch: %w", err)
+		if reservedUntilStr.Valid {
+			j.ReservedUntil = reservedUntilStr.Time
+		}
+		if dedupExpiresAt.Valid {
+			j.DeduplicationExpiresAt = dedupExpiresAt.Time
+		}
+		if dedupKeyStr.Valid {
+			j.DeduplicationKey = dedupKeyStr.String
+		}
+		if lastErrStr.Valid {
+			j.LastError = lastErrStr.String
+		}
+		if traceContextStr.Valid && traceContextStr.String != "" {
+			_ = json.Unmarshal([]byte(traceContextStr.String), &j.TraceContext)
 		}
 
-		var candidates []*Job
-		for rows.Next() {
-			var j Job
-			var reservedUntilStr sql.NullTime
-			var dedupExpiresAt sql.NullTime
-			var dedupKeyStr sql.NullString
-			var lastErrStr sql.NullString
-			var traceContextStr sql.NullString
-
-			err := rows.Scan(
-				&j.ID,
-				&j.Queue,
-				&j.Priority,
-				&dedupKeyStr,
-				&dedupExpiresAt,
-				&j.Type,
-				&j.Payload,
-				&j.State,
-				&j.Retries,
-				&j.MaxRetries,
-				&j.RunAt,
-				&reservedUntilStr,
-				&lastErrStr,
-				&j.CreatedAt,
-				&j.UpdatedAt,
-				&traceContextStr,
-			)
-			if err != nil {
-				rows.Close()
-				tx.Rollback()
-				return nil, err
-			}
-
-			if reservedUntilStr.Valid {
-				j.ReservedUntil = reservedUntilStr.Time
-			}
-			if dedupExpiresAt.Valid {
-				j.DeduplicationExpiresAt = dedupExpiresAt.Time
-			}
-			if dedupKeyStr.Valid {
-				j.DeduplicationKey = dedupKeyStr.String
-			}
-			if lastErrStr.Valid {
-				j.LastError = lastErrStr.String
-			}
-			if traceContextStr.Valid && traceContextStr.String != "" {
-				_ = json.Unmarshal([]byte(traceContextStr.String), &j.TraceContext)
-			}
-
-			candidates = append(candidates, &j)
-		}
-		rows.Close()
-
-		if len(candidates) == 0 {
-			tx.Rollback()
-			return []*Job{}, nil
-		}
-
-		// Try to claim all candidates
-		claimed := make([]*Job, 0, len(candidates))
-		newReservedUntil := now.Add(leaseDuration)
-
-		for _, j := range candidates {
-			updateQuery := `
-				UPDATE jobs
-				SET state = 'processing', reserved_until = ?, updated_at = ?
-				WHERE id = ? AND (state = 'pending' OR state = 'failed')
-			`
-			result, err := tx.ExecContext(ctx, updateQuery, newReservedUntil, now, j.ID)
-			if err != nil {
-				break
-			}
-			affected, err := result.RowsAffected()
-			if err == nil && affected == 1 {
-				j.State = StateProcessing
-				j.ReservedUntil = newReservedUntil
-				j.UpdatedAt = now
-				claimed = append(claimed, j)
-			}
-		}
-
-		if len(claimed) > 0 {
-			if err := tx.Commit(); err != nil {
-				tx.Rollback()
-				continue
-			}
-			return claimed, nil
-		}
-
-		tx.Rollback()
-		time.Sleep(10 * time.Millisecond)
+		claimed = append(claimed, &j)
 	}
 
-	return []*Job{}, nil
+	return claimed, nil
 }
 
 // Ack marks the job as completed successfully.
-func (s *SQLiteStore) Ack(ctx context.Context, jobID string) error {
+func (s *PostgresStore) Ack(ctx context.Context, jobID string) error {
 	now := time.Now()
 	query := `
 		UPDATE jobs
-		SET state = 'completed', reserved_until = NULL, updated_at = ?
-		WHERE id = ? AND state = 'processing'
+		SET state = 'completed', reserved_until = NULL, updated_at = $1
+		WHERE id = $2 AND state = 'processing'
 	`
 	result, err := s.db.ExecContext(ctx, query, now, jobID)
 	if err != nil {
@@ -425,7 +384,7 @@ func (s *SQLiteStore) Ack(ctx context.Context, jobID string) error {
 	}
 
 	var jobType string
-	err = s.db.QueryRowContext(ctx, "SELECT type FROM jobs WHERE id = ?", jobID).Scan(&jobType)
+	err = s.db.QueryRowContext(ctx, "SELECT type FROM jobs WHERE id = $1", jobID).Scan(&jobType)
 	if err == nil {
 		JobsProcessed.WithLabelValues(jobType, string(StateCompleted)).Inc()
 	}
@@ -434,12 +393,12 @@ func (s *SQLiteStore) Ack(ctx context.Context, jobID string) error {
 }
 
 // Nack handles failures. Increments retries and transitions to DLQ if max_retries reached.
-func (s *SQLiteStore) Nack(ctx context.Context, jobID string, nextRunIn time.Duration, lastErr error) error {
+func (s *PostgresStore) Nack(ctx context.Context, jobID string, nextRunIn time.Duration, lastErr error) error {
 	now := time.Now()
 
 	var retries, maxRetries int
 	var jobType string
-	querySelect := "SELECT retries, max_retries, type FROM jobs WHERE id = ? AND state = 'processing'"
+	querySelect := "SELECT retries, max_retries, type FROM jobs WHERE id = $1 AND state = 'processing'"
 	err := s.db.QueryRowContext(ctx, querySelect, jobID).Scan(&retries, &maxRetries, &jobType)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -462,8 +421,8 @@ func (s *SQLiteStore) Nack(ctx context.Context, jobID string, nextRunIn time.Dur
 
 	queryUpdate := `
 		UPDATE jobs
-		SET state = ?, retries = ?, last_error = ?, reserved_until = NULL, run_at = ?, updated_at = ?
-		WHERE id = ? AND state = 'processing'
+		SET state = $1, retries = $2, last_error = $3, reserved_until = NULL, run_at = $4, updated_at = $5
+		WHERE id = $6 AND state = 'processing'
 	`
 
 	_, err = s.db.ExecContext(ctx, queryUpdate, newState, newRetries, lastErr.Error(), nextRunAt, now, jobID)
@@ -481,14 +440,14 @@ func (s *SQLiteStore) Nack(ctx context.Context, jobID string, nextRunIn time.Dur
 }
 
 // Heartbeat extends the visibility timeout of a processing job.
-func (s *SQLiteStore) Heartbeat(ctx context.Context, jobID string, extendBy time.Duration) error {
+func (s *PostgresStore) Heartbeat(ctx context.Context, jobID string, extendBy time.Duration) error {
 	now := time.Now()
 	newReservedUntil := now.Add(extendBy)
 
 	query := `
 		UPDATE jobs
-		SET reserved_until = ?, updated_at = ?
-		WHERE id = ? AND state = 'processing'
+		SET reserved_until = $1, updated_at = $2
+		WHERE id = $3 AND state = 'processing'
 	`
 	result, err := s.db.ExecContext(ctx, query, newReservedUntil, now, jobID)
 	if err != nil {
@@ -506,7 +465,7 @@ func (s *SQLiteStore) Heartbeat(ctx context.Context, jobID string, extendBy time
 }
 
 // GetStats returns current counts of jobs by state.
-func (s *SQLiteStore) GetStats(ctx context.Context) (Stats, error) {
+func (s *PostgresStore) GetStats(ctx context.Context) (Stats, error) {
 	query := "SELECT state, COUNT(*) FROM jobs GROUP BY state"
 	rows, err := s.db.QueryContext(ctx, query)
 	if err != nil {
@@ -539,13 +498,13 @@ func (s *SQLiteStore) GetStats(ctx context.Context) (Stats, error) {
 }
 
 // ListJobs returns jobs filtered by state with pagination.
-func (s *SQLiteStore) ListJobs(ctx context.Context, state JobState, limit, offset int) ([]*Job, error) {
+func (s *PostgresStore) ListJobs(ctx context.Context, state JobState, limit, offset int) ([]*Job, error) {
 	query := `
 		SELECT id, queue, priority, deduplication_key, deduplication_expires_at, type, payload, state, retries, max_retries, run_at, reserved_until, last_error, created_at, updated_at, trace_context
 		FROM jobs
-		WHERE state = ?
+		WHERE state = $1
 		ORDER BY created_at DESC
-		LIMIT ? OFFSET ?
+		LIMIT $2 OFFSET $3
 	`
 	rows, err := s.db.QueryContext(ctx, query, string(state), limit, offset)
 	if err != nil {
@@ -607,7 +566,7 @@ func (s *SQLiteStore) ListJobs(ctx context.Context, state JobState, limit, offse
 }
 
 // RedriveDeadLetter resets retries and schedules dead-lettered jobs to run immediately.
-func (s *SQLiteStore) RedriveDeadLetter(ctx context.Context, jobIDs []string) (int, error) {
+func (s *PostgresStore) RedriveDeadLetter(ctx context.Context, jobIDs []string) (int, error) {
 	now := time.Now()
 	var query string
 	var args []interface{}
@@ -616,18 +575,18 @@ func (s *SQLiteStore) RedriveDeadLetter(ctx context.Context, jobIDs []string) (i
 	if len(jobIDs) == 0 {
 		query = `
 			UPDATE jobs
-			SET state = 'pending', retries = 0, last_error = NULL, reserved_until = NULL, run_at = ?, updated_at = ?
+			SET state = 'pending', retries = 0, last_error = NULL, reserved_until = NULL, run_at = $1, updated_at = $2
 			WHERE state = 'dead_letter'
 		`
 	} else {
 		placeholders := make([]string, len(jobIDs))
 		for i, id := range jobIDs {
-			placeholders[i] = "?"
+			placeholders[i] = fmt.Sprintf("$%d", i+3)
 			args = append(args, id)
 		}
 		query = fmt.Sprintf(`
 			UPDATE jobs
-			SET state = 'pending', retries = 0, last_error = NULL, reserved_until = NULL, run_at = ?, updated_at = ?
+			SET state = 'pending', retries = 0, last_error = NULL, reserved_until = NULL, run_at = $1, updated_at = $2
 			WHERE state = 'dead_letter' AND id IN (%s)
 		`, strings.Join(placeholders, ","))
 	}
@@ -646,7 +605,7 @@ func (s *SQLiteStore) RedriveDeadLetter(ctx context.Context, jobIDs []string) (i
 }
 
 // DeleteDeadLetter permanently removes dead-lettered jobs.
-func (s *SQLiteStore) DeleteDeadLetter(ctx context.Context, jobIDs []string) error {
+func (s *PostgresStore) DeleteDeadLetter(ctx context.Context, jobIDs []string) error {
 	var query string
 	var args []interface{}
 
@@ -655,7 +614,7 @@ func (s *SQLiteStore) DeleteDeadLetter(ctx context.Context, jobIDs []string) err
 	} else {
 		placeholders := make([]string, len(jobIDs))
 		for i, id := range jobIDs {
-			placeholders[i] = "?"
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
 			args = append(args, id)
 		}
 		query = fmt.Sprintf("DELETE FROM jobs WHERE state = 'dead_letter' AND id IN (%s)", strings.Join(placeholders, ","))
@@ -670,13 +629,13 @@ func (s *SQLiteStore) DeleteDeadLetter(ctx context.Context, jobIDs []string) err
 }
 
 // SweeperReleaseExpired releases jobs locked in 'processing' whose lease has expired.
-func (s *SQLiteStore) SweeperReleaseExpired(ctx context.Context) (int, error) {
+func (s *PostgresStore) SweeperReleaseExpired(ctx context.Context) (int, error) {
 	now := time.Now()
 
 	querySelect := `
 		SELECT id, type, retries, max_retries
 		FROM jobs
-		WHERE state = 'processing' AND reserved_until < ?
+		WHERE state = 'processing' AND reserved_until < $1
 	`
 	rows, err := s.db.QueryContext(ctx, querySelect, now)
 	if err != nil {
@@ -717,8 +676,8 @@ func (s *SQLiteStore) SweeperReleaseExpired(ctx context.Context) (int, error) {
 
 		queryUpdate := `
 			UPDATE jobs
-			SET state = ?, retries = ?, last_error = 'lease expired: worker heartbeat timeout', reserved_until = NULL, run_at = ?, updated_at = ?
-			WHERE id = ? AND state = 'processing' AND reserved_until < ?
+			SET state = $1, retries = $2, last_error = 'lease expired: worker heartbeat timeout', reserved_until = NULL, run_at = $3, updated_at = $4
+			WHERE id = $5 AND state = 'processing' AND reserved_until < $6
 		`
 		result, err := s.db.ExecContext(ctx, queryUpdate, newState, newRetries, nextRunAt, now, ej.id, now)
 		if err != nil {

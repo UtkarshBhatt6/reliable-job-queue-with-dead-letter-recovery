@@ -95,6 +95,7 @@ func (s *Server) Start() {
 	// API Endpoints
 	mux.HandleFunc("/api/stats", s.handleStats)
 	mux.HandleFunc("/api/jobs", s.handleJobs)
+	mux.HandleFunc("/api/jobs/batch", s.handleJobsBatch)
 	mux.HandleFunc("/api/jobs/redrive", s.handleRedrive)
 	mux.HandleFunc("/api/jobs/delete", s.handleDelete)
 	mux.HandleFunc("/api/events", s.handleEvents)
@@ -124,12 +125,15 @@ func (s *Server) handleStats(w http.ResponseWriter, r *http.Request) {
 }
 
 type enqueueRequest struct {
-	Queue      string `json:"queue"`
-	Type       string `json:"type"`
-	Payload    string `json:"payload"`
-	DelaySec   int    `json:"delay_sec"`
-	MaxRetries int    `json:"max_retries"`
-	ForceFail  bool   `json:"force_fail"`
+	Queue            string `json:"queue"`
+	Priority         int    `json:"priority"`
+	DeduplicationKey string `json:"deduplication_key"`
+	DeduplicationTTL int    `json:"deduplication_ttl"`
+	Type             string `json:"type"`
+	Payload          string `json:"payload"`
+	DelaySec         int    `json:"delay_sec"`
+	MaxRetries       int    `json:"max_retries"`
+	ForceFail        bool   `json:"force_fail"`
 }
 
 func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
@@ -189,13 +193,21 @@ func (s *Server) handleJobs(w http.ResponseWriter, r *http.Request) {
 			req.Queue = "default"
 		}
 
+		var dedupExpires time.Time
+		if req.DeduplicationKey != "" && req.DeduplicationTTL > 0 {
+			dedupExpires = time.Now().Add(time.Duration(req.DeduplicationTTL) * time.Second)
+		}
+
 		job := &queue.Job{
-			ID:         uuid.New().String(),
-			Queue:      req.Queue,
-			Type:       req.Type,
-			Payload:    payloadBytes,
-			MaxRetries: req.MaxRetries,
-			RunAt:      runAt,
+			ID:                     uuid.New().String(),
+			Queue:                  req.Queue,
+			Priority:               req.Priority,
+			DeduplicationKey:       req.DeduplicationKey,
+			DeduplicationExpiresAt: dedupExpires,
+			Type:                   req.Type,
+			Payload:                payloadBytes,
+			MaxRetries:             req.MaxRetries,
+			RunAt:                  runAt,
 		}
 
 		// Inject trace context from request context (if any) to demonstrate tracing propagation
@@ -304,6 +316,72 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
+}
+
+func (s *Server) handleJobsBatch(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var req []enqueueRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	var jobs []*queue.Job
+	for _, item := range req {
+		if item.Type == "" {
+			http.Error(w, "job type is required for all batch items", http.StatusBadRequest)
+			return
+		}
+		if item.MaxRetries <= 0 {
+			item.MaxRetries = 3
+		}
+		payloadMap := map[string]interface{}{
+			"data":       item.Payload,
+			"force_fail": item.ForceFail,
+		}
+		payloadBytes, err := json.Marshal(payloadMap)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		runAt := time.Now()
+		if item.DelaySec > 0 {
+			runAt = runAt.Add(time.Duration(item.DelaySec) * time.Second)
+		}
+		if item.Queue == "" {
+			item.Queue = "default"
+		}
+		var dedupExpires time.Time
+		if item.DeduplicationKey != "" && item.DeduplicationTTL > 0 {
+			dedupExpires = time.Now().Add(time.Duration(item.DeduplicationTTL) * time.Second)
+		}
+
+		job := &queue.Job{
+			ID:                     uuid.New().String(),
+			Queue:                  item.Queue,
+			Priority:               item.Priority,
+			DeduplicationKey:       item.DeduplicationKey,
+			DeduplicationExpiresAt: dedupExpires,
+			Type:                   item.Type,
+			Payload:                payloadBytes,
+			MaxRetries:             item.MaxRetries,
+			RunAt:                  runAt,
+		}
+		queue.InjectTraceContext(r.Context(), job)
+		jobs = append(jobs, job)
+	}
+
+	if err := s.store.EnqueueBatch(r.Context(), jobs); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	s.NotifyChange()
+	w.WriteHeader(http.StatusCreated)
+	w.Write([]byte(`{"status":"success"}`))
 }
 
 // Help create the static directory structure programmatically

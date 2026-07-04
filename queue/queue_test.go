@@ -34,7 +34,7 @@ func TestQueueStores(t *testing.T) {
 		t.Run(name, func(t *testing.T) {
 			ctx := context.Background()
 
-			// Test Enqueue and Dequeue
+			// 1. Test Enqueue and Dequeue
 			job1 := &Job{
 				ID:         "job-1",
 				Type:       "email",
@@ -76,7 +76,7 @@ func TestQueueStores(t *testing.T) {
 				t.Errorf("expected completed=1, got %d", stats.Completed)
 			}
 
-			// Test Retries & DLQ
+			// 2. Test Retries & DLQ
 			job2 := &Job{
 				ID:         "job-2",
 				Type:       "sms",
@@ -153,7 +153,13 @@ func TestQueueStores(t *testing.T) {
 				t.Errorf("expected pending=1 dead_letter=0 after redrive, got pending=%d dlq=%d", stats.Pending, stats.DeadLetter)
 			}
 
-			// Test Sweeper lease expiry
+			// Dequeue and Ack the redriven job to keep store clean
+			cleanDq, _ := store.Dequeue(ctx, []string{"default"}, []string{"sms"}, 5*time.Second)
+			if cleanDq != nil {
+				_ = store.Ack(ctx, cleanDq.ID)
+			}
+
+			// 3. Test Sweeper lease expiry
 			job3 := &Job{
 				ID:         "job-3",
 				Type:       "render",
@@ -187,7 +193,13 @@ func TestQueueStores(t *testing.T) {
 				t.Errorf("expected job-3 to be failed or pending after sweep, got %+v", stats)
 			}
 
-			// Test Named Queue Isolation
+			// Clean up sweeper job
+			cleanDq3, _ := store.Dequeue(ctx, []string{"default"}, []string{"render"}, 5*time.Second)
+			if cleanDq3 != nil {
+				_ = store.Ack(ctx, cleanDq3.ID)
+			}
+
+			// 4. Test Named Queue Isolation
 			job4 := &Job{
 				ID:         "job-4",
 				Queue:      "critical",
@@ -217,6 +229,139 @@ func TestQueueStores(t *testing.T) {
 
 			// Clean up critical job
 			_ = store.Ack(ctx, "job-4")
+
+			// 5. Test Priority Queuing
+			pLow := &Job{
+				ID:       "p-low",
+				Priority: 1,
+				Type:     "p-test",
+				Payload:  []byte("low"),
+			}
+			pHigh := &Job{
+				ID:       "p-high",
+				Priority: 10,
+				Type:     "p-test",
+				Payload:  []byte("high"),
+			}
+			_ = store.Enqueue(ctx, pLow)
+			_ = store.Enqueue(ctx, pHigh)
+
+			// First dequeue MUST return p-high due to higher priority
+			dqP1, err := store.Dequeue(ctx, []string{"default"}, []string{"p-test"}, 10*time.Second)
+			if err != nil || dqP1 == nil {
+				t.Fatalf("Priority dequeue 1 failed: %v", err)
+			}
+			if dqP1.ID != "p-high" {
+				t.Errorf("expected highest priority job p-high, got %s", dqP1.ID)
+			}
+
+			dqP2, _ := store.Dequeue(ctx, []string{"default"}, []string{"p-test"}, 10*time.Second)
+			if dqP2 == nil || dqP2.ID != "p-low" {
+				t.Errorf("expected lower priority job p-low next, got %v", dqP2)
+			}
+
+			_ = store.Ack(ctx, "p-high")
+			_ = store.Ack(ctx, "p-low")
+
+			// 6. Test Idempotency Keys & Deduplication
+			dedupKey := "dedup-123"
+			d1 := &Job{
+				ID:                     "d-1",
+				DeduplicationKey:       dedupKey,
+				DeduplicationExpiresAt: time.Now().Add(500 * time.Millisecond),
+				Type:                   "d-test",
+				Payload:                []byte("d1"),
+			}
+			d2 := &Job{
+				ID:                     "d-2",
+				DeduplicationKey:       dedupKey,
+				DeduplicationExpiresAt: time.Now().Add(500 * time.Millisecond),
+				Type:                   "d-test",
+				Payload:                []byte("d2"),
+			}
+
+			// Enqueue d1
+			if err := store.Enqueue(ctx, d1); err != nil {
+				t.Fatalf("D1 Enqueue failed: %v", err)
+			}
+
+			// Enqueue d2 (duplicate key) -> should be deduplicated
+			if err := store.Enqueue(ctx, d2); err != nil {
+				t.Fatalf("D2 Enqueue errored instead of being deduplicated: %v", err)
+			}
+
+			// Verify only d1 is pending, d2 is not enqueued
+			dqD, err := store.Dequeue(ctx, []string{"default"}, []string{"d-test"}, 10*time.Second)
+			if err != nil || dqD == nil {
+				t.Fatalf("Deduplication dequeue failed: %v", err)
+			}
+			if dqD.ID != "d-1" {
+				t.Errorf("expected d-1, got %s", dqD.ID)
+			}
+
+			// Try dequeuing again - should be nil (d2 was ignored)
+			dqD2, _ := store.Dequeue(ctx, []string{"default"}, []string{"d-test"}, 10*time.Second)
+			if dqD2 != nil {
+				t.Errorf("expected no other job (d2 should have been deduplicated), got %s", dqD2.ID)
+			}
+
+			_ = store.Ack(ctx, "d-1")
+
+			// 7. Test Heartbeat lease extensions
+			hbJob := &Job{
+				ID:      "hb-job",
+				Type:    "hb-test",
+				Payload: []byte("hb"),
+			}
+			_ = store.Enqueue(ctx, hbJob)
+
+			// Dequeue with very short lease (100ms)
+			dqHB, err := store.Dequeue(ctx, []string{"default"}, []string{"hb-test"}, 100*time.Millisecond)
+			if err != nil || dqHB == nil {
+				t.Fatalf("Heartbeat dequeue failed: %v", err)
+			}
+
+			// Trigger Heartbeat to extend by another 300ms
+			time.Sleep(30 * time.Millisecond) // after 30ms
+			err = store.Heartbeat(ctx, dqHB.ID, 300*time.Millisecond)
+			if err != nil {
+				t.Fatalf("Heartbeat call failed: %v", err)
+			}
+
+			// Wait 120ms (total 150ms since claim). Original 100ms lease expired, but extended is active!
+			time.Sleep(120 * time.Millisecond)
+
+			// Sweeper should NOT release the job
+			releasedCount, _ := store.SweeperReleaseExpired(ctx)
+			if releasedCount != 0 {
+				t.Errorf("expected sweeper to release 0 jobs, but released %d (heartbeat failed to extend lease)", releasedCount)
+			}
+
+			_ = store.Ack(ctx, "hb-job")
+
+			// 8. Test Batch Enqueue & Dequeue
+			bJobs := []*Job{
+				{ID: "b-1", Type: "b-test", Payload: []byte("1")},
+				{ID: "b-2", Type: "b-test", Payload: []byte("2")},
+				{ID: "b-3", Type: "b-test", Payload: []byte("3")},
+			}
+
+			err = store.EnqueueBatch(ctx, bJobs)
+			if err != nil {
+				t.Fatalf("EnqueueBatch failed: %v", err)
+			}
+
+			dqBatch, err := store.DequeueBatch(ctx, []string{"default"}, []string{"b-test"}, 5, 10*time.Second)
+			if err != nil {
+				t.Fatalf("DequeueBatch failed: %v", err)
+			}
+			if len(dqBatch) != 3 {
+				t.Errorf("expected 3 jobs in batch, got %d", len(dqBatch))
+			}
+
+			for _, j := range dqBatch {
+				_ = store.Ack(ctx, j.ID)
+			}
 		})
 	}
 }

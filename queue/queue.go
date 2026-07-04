@@ -25,19 +25,22 @@ const (
 
 // Job represents a single unit of work.
 type Job struct {
-	ID            string            `json:"id"`
-	Queue         string            `json:"queue"`
-	Type          string            `json:"type"`
-	Payload       []byte            `json:"payload"`
-	State         JobState          `json:"state"`
-	Retries       int               `json:"retries"`
-	MaxRetries    int               `json:"max_retries"`
-	RunAt         time.Time         `json:"run_at"`
-	ReservedUntil time.Time         `json:"reserved_until"`
-	LastError     string            `json:"last_error,omitempty"`
-	CreatedAt     time.Time         `json:"created_at"`
-	UpdatedAt     time.Time         `json:"updated_at"`
-	TraceContext  map[string]string `json:"trace_context,omitempty"` // Trace context carrier for OTel
+	ID                     string            `json:"id"`
+	Queue                  string            `json:"queue"`
+	Priority               int               `json:"priority"` // Higher priority executed first
+	DeduplicationKey       string            `json:"deduplication_key,omitempty"`
+	DeduplicationExpiresAt time.Time         `json:"deduplication_expires_at,omitempty"`
+	Type                   string            `json:"type"`
+	Payload                []byte            `json:"payload"`
+	State                  JobState          `json:"state"`
+	Retries                int               `json:"retries"`
+	MaxRetries             int               `json:"max_retries"`
+	RunAt                  time.Time         `json:"run_at"`
+	ReservedUntil          time.Time         `json:"reserved_until"`
+	LastError              string            `json:"last_error,omitempty"`
+	CreatedAt              time.Time         `json:"created_at"`
+	UpdatedAt              time.Time         `json:"updated_at"`
+	TraceContext           map[string]string `json:"trace_context,omitempty"` // Trace context carrier for OTel
 }
 
 // Stats represents the counts of jobs in various states.
@@ -54,9 +57,15 @@ type Store interface {
 	// Enqueue adds a new job to the store.
 	Enqueue(ctx context.Context, job *Job) error
 
+	// EnqueueBatch adds multiple new jobs to the store atomically in a single operation.
+	EnqueueBatch(ctx context.Context, jobs []*Job) error
+
 	// Dequeue selects and reserves the next available job of the specified queues and types.
 	// It returns nil, nil if no jobs are available.
 	Dequeue(ctx context.Context, queues []string, types []string, leaseDuration time.Duration) (*Job, error)
+
+	// DequeueBatch selects and reserves up to batchSize next available jobs of specified queues and types.
+	DequeueBatch(ctx context.Context, queues []string, types []string, batchSize int, leaseDuration time.Duration) ([]*Job, error)
 
 	// Ack marks the job as completed.
 	Ack(ctx context.Context, jobID string) error
@@ -64,6 +73,9 @@ type Store interface {
 	// Nack increments retries, saves the error, and schedules the job for a retry after nextRunIn.
 	// If the job exceeds MaxRetries, it transitions to StateDeadLetter.
 	Nack(ctx context.Context, jobID string, nextRunIn time.Duration, err error) error
+
+	// Heartbeat extends the visibility timeout/lease of a processing job by extendBy.
+	Heartbeat(ctx context.Context, jobID string, extendBy time.Duration) error
 
 	// GetStats returns the queue metrics.
 	GetStats(ctx context.Context) (Stats, error)
