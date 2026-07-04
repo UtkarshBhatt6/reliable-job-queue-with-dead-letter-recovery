@@ -4,6 +4,7 @@ A production-grade, transactionally resilient, concurrent job queue engine writt
 
 ## Features
 
+- **Named Queues**: Organizes jobs into prioritized pipelines (`critical`, `high`, `default`, `low`). This allows assigning dedicated worker pools to target specific high-priority workloads.
 - **Double-Safe Reliability**:
   - **In-Memory Store**: Fast, concurrent-safe store using Go RWMutex and memory lists, ideal for tests.
   - **SQLite Store**: Fully persistent, transaction-safe, WAL-enabled SQL store using CGO-free SQLite, ensuring jobs survive application restarts without extra database infrastructure.
@@ -45,9 +46,9 @@ reliable-job-queue-with-dead-letter-recovery/
 
 ### Key Components
 
-- [Job](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/queue.go#L23): Struct modeling the job record (ID, Type, State, Payload, Retries, Lease info, Trace context).
-- [Store Interface](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/queue.go#L44): Abstract CRUD layer enabling drop-in database migrations (supported by [MemoryStore](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/memory.go#L11) and [SQLiteStore](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/sqlite.go#L14)).
-- [WorkerPool](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/worker.go#L15): Poller routine executing concurrency pools, tracing, and exponential retry scheduling.
+- [Job](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/queue.go#L27): Struct modeling the job record (ID, Queue, Type, Payload, Retries, Lease info, Trace context).
+- [Store Interface](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/queue.go#L52): Abstract CRUD layer enabling drop-in database migrations (supported by [MemoryStore](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/memory.go#L11) and [SQLiteStore](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/sqlite.go#L14)).
+- [WorkerPool](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/worker.go#L20): Poller routine executing concurrency pools, tracing, and exponential retry scheduling.
 - [Telemetry Helpers](file:///Users/fbin-blr-0025/finbox-work/reliable-job-queue-with-dead-letter-recovery/queue/telemetry.go): Standardizing counters, gauges, histograms, and Context carrier propagators.
 
 ---
@@ -61,7 +62,7 @@ go mod tidy
 ```
 
 ### 2. Run Tests
-Verify both backend engines and retry managers by running the unit tests:
+Verify both backend engines, queue isolation, and retry managers by running the unit tests:
 ```bash
 go test -v ./queue
 ```
@@ -82,10 +83,11 @@ Once running:
 ## UI Guide
 
 The Web UI allows you to test all reliability scenarios visually:
-1. **Successful Executions**: Choose `send_email`, type `hello@domain.com`, and click "Enqueue". It executes and instantly appears in **Completed**.
-2. **Delayed Executions**: Enter a "Delay (seconds)" value of `10`. The job will sit in **Pending** as scheduled, and run precisely after 10 seconds.
-3. **Dead-Lettering**: Check the **Force failure** checkbox and submit a job. You will watch it fail, retry with exponential backoff (state: **Failed (Retrying)**), and finally quarantine into the **Dead Letter (DLQ)** panel.
-4. **Replays (Redrive)**: Open the **Dead Letter (DLQ)** tab, inspect the job's last failure message, and click **Redrive** to reset retries and re-run.
+1. **Queue Selection**: Choose the destination queue name (`critical`, `high`, `default`, `low`) for your job submission. The jobs list will display a colored badge identifying the queue.
+2. **Successful Executions**: Choose `send_email`, type `hello@domain.com`, and click "Enqueue". It executes and instantly appears in **Completed**.
+3. **Delayed Executions**: Enter a "Delay (seconds)" value of `10`. The job will sit in **Pending** as scheduled, and run precisely after 10 seconds.
+4. **Dead-Lettering**: Check the **Force failure** checkbox and submit a job. You will watch it fail, retry with exponential backoff (state: **Failed (Retrying)**), and finally quarantine into the **Dead Letter (DLQ)** panel.
+5. **Replays (Redrive)**: Open the **Dead Letter (DLQ)** tab, inspect the job's last failure message, and click **Redrive** to reset retries and re-run.
 
 ---
 
